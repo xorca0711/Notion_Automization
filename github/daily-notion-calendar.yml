@@ -1,0 +1,22 @@
+name: daily-notion-calendar
+
+# 03:00 KST = 18:00 UTC (KST is UTC+9, no daylight saving).
+# Note: GitHub's scheduler can lag a few minutes under load; if exact 3 AM
+# matters, this still lands within the early-morning window.
+on:
+  schedule:
+    - cron: "0 18 * * *"
+  workflow_dispatch: {}   # lets you trigger a run manually from the Actions tab
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install requests
+      - run: python daily_calendar.py
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}

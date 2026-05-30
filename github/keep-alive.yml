@@ -1,0 +1,28 @@
+name: keep-alive
+
+# Prevents GitHub from auto-disabling scheduled workflows after 60 days of
+# repository inactivity. Does nothing but push an empty commit once a week.
+# Runs Mondays at 17:50 UTC (02:50 KST) — just before the daily generator,
+# so an active repo is guaranteed before each week's runs.
+on:
+  schedule:
+    - cron: "50 17 * * 1"
+  workflow_dispatch: {}
+
+# Needs write access to push the keep-alive commit.
+permissions:
+  contents: write
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Empty commit to reset inactivity timer
+        run: |
+          git config user.name  "keep-alive-bot"
+          git config user.email "actions@github.com"
+          git commit --allow-empty -m "chore: keep-alive $(date -u +%Y-%m-%d)"
+          git push
