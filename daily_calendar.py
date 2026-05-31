@@ -189,8 +189,10 @@ def deadline_within_window(text: str, today: dt.date) -> int | None:
 def find_prior_daily(today: dt.date) -> tuple[str | None, list[dict]]:
     """
     Return (id_of_most_recent_prior_daily_page, home_stale_pages).
-    - Searches HOME first, then LEGACY_PARENTS, for the latest page dated < today.
-    - home_stale_pages: daily pages at HOME with date < today (these get moved).
+    - Carry-forward source: the single most recent page dated < today, searched
+      across HOME, the Calendar archive, AND legacy parents. Searching Calendar
+      matters because yesterday's page may already have been archived there.
+    - home_stale_pages: daily pages still at HOME with date < today (to be moved).
     """
     home_children = list_child_pages(HOME_PAGE_ID)
     home_dated = []
@@ -201,13 +203,13 @@ def find_prior_daily(today: dt.date) -> tuple[str | None, list[dict]]:
     home_dated.sort(key=lambda x: x[0])
     home_stale = [c for _, c in home_dated]
 
+    # Gather carry-forward candidates from every location, not just HOME.
     candidates = list(home_dated)
-    if not candidates:                       # first-run fallback to legacy locations
-        for parent in LEGACY_PARENTS:
-            for c in list_child_pages(parent):
-                d = parse_title_date(c["title"], today.year)
-                if d and d < today:
-                    candidates.append((d, c))
+    for parent in [ARCHIVE_PAGE_ID, *LEGACY_PARENTS]:
+        for c in list_child_pages(parent):
+            d = parse_title_date(c["title"], today.year)
+            if d and d < today:
+                candidates.append((d, c))
     candidates.sort(key=lambda x: x[0])
     prior_id = candidates[-1][1]["id"] if candidates else None
     return prior_id, home_stale
