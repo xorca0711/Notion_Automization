@@ -100,46 +100,70 @@ def list_child_pages(page_id: str) -> list[dict]:
     return out
 
 
-def read_blocks_text(page_id: str) -> list[str]:
-    """Flatten a page's top-level blocks into plain text lines."""
-    lines, cursor = [], None
+def _block_text(b: dict) -> str:
+    t = b["type"]
+    rich = b.get(t, {}).get("rich_text")
+    if isinstance(rich, list):
+        return "".join(s.get("plain_text", "") for s in rich).strip()
+    return ""
+
+
+def read_tree(block_id: str) -> list[dict]:
+    """Recursively read a page/block's children into nodes:
+    {type, text, children:[...]}. Preserves nesting depth."""
+    nodes, cursor = [], None
     while True:
         params = {"page_size": 100}
         if cursor:
             params["start_cursor"] = cursor
-        r = requests.get(f"{API}/blocks/{page_id}/children", headers=HEADERS, params=params)
+        r = requests.get(f"{API}/blocks/{block_id}/children", headers=HEADERS, params=params)
         r.raise_for_status()
         data = r.json()
         for b in data["results"]:
             t = b["type"]
-            rich = b.get(t, {}).get("rich_text")
-            if isinstance(rich, list):
-                txt = "".join(s.get("plain_text", "") for s in rich).strip()
-                if t in ("numbered_list_item", "bulleted_list_item"):
-                    txt = "• " + txt
-                lines.append(txt)
-            elif t == "divider":
-                lines.append("---")
+            if t == "child_page":               # don't descend into sub-pages
+                continue
+            node = {"type": t, "text": _block_text(b), "children": []}
+            if b.get("has_children"):
+                node["children"] = read_tree(b["id"])
+            nodes.append(node)
         if not data.get("has_more"):
             break
         cursor = data["next_cursor"]
-    return lines
+    return nodes
 
 
-def sectionize(lines: list[str]) -> dict[str, list[str]]:
-    """Group lines under their section label (Must/Forward/Want/Reminder/Done)."""
-    sections: dict[str, list[str]] = {s: [] for s in SECTION_ORDER}
+def _is_meaningful(node: dict) -> bool:
+    """Drop empty placeholder items (e.g. a bare '2.' with no text/children)."""
+    return bool(node["text"]) or any(_is_meaningful(c) for c in node["children"])
+
+
+def section_label(text: str) -> str | None:
+    """Return the section name if this line is a section header, else None.
+    Tolerates **bold** markers and the '⚠ N일 이내 마감' suffix on Reminder."""
+    t = text.strip().strip("*").strip()
+    for lab in SECTION_ORDER:
+        if t.lower() == lab.lower() or (
+            t.lower().startswith(lab.lower()) and len(t) <= len(lab) + 25
+        ):
+            return lab
+    return None
+
+
+def sectionize_tree(nodes: list[dict]) -> dict[str, list[dict]]:
+    """Group top-level nodes under their section header, keeping each
+    item's nested subtree intact."""
+    sections: dict[str, list[dict]] = {s: [] for s in SECTION_ORDER}
     current = None
-    label_re = re.compile(r"^\**\s*(Must|Forward|Want|Reminder|Done)\b", re.I)
-    for ln in lines:
-        m = label_re.match(ln)
-        if m:
-            current = m.group(1).capitalize()
+    for n in nodes:
+        if n["type"] == "divider":
             continue
-        if current and ln and ln != "---":
-            item = ln.lstrip("• ").strip()
-            if item:
-                sections[current].append(item)
+        lab = section_label(n["text"]) if n["text"] else None
+        if lab:
+            current = lab
+            continue
+        if current and _is_meaningful(n):
+            sections[current].append(n)
     return sections
 
 
@@ -190,60 +214,109 @@ def find_prior_daily(today: dt.date) -> tuple[str | None, list[dict]]:
 
 
 # ----------------------------------------------------------------------------
-# Page builder
+# Page builder  — native blocks, preserving nested sub-items at any depth
 # ----------------------------------------------------------------------------
-def build_markdown(today: dt.date, prev: dict[str, list[str]] | None) -> str:
+LIST_TYPES = ("numbered_list_item", "bulleted_list_item", "to_do", "toggle", "paragraph")
+
+def _heading(text: str) -> dict:
+    return {"type": "heading_3", "text": text, "children": []}
+
+def _divider_node() -> dict:
+    return {"type": "divider", "text": "", "children": []}
+
+
+# A previously-flagged reminder looks like "⚠ <text>  [D-3]". Strip the flag
+# back off before re-evaluating, so markers don't pile up day after day.
+_FLAG_RE = re.compile(r"^\s*⚠\s*")
+_DSUFFIX_RE = re.compile(r"\s*\[D-\d+\]\s*$")
+
+def _strip_flag(text: str) -> str:
+    return _DSUFFIX_RE.sub("", _FLAG_RE.sub("", text)).strip()
+
+
+def _subtree_text(node: dict) -> str:
+    """All text in a node and its descendants (for deadline scanning)."""
+    return node["text"] + " " + " ".join(_subtree_text(c) for c in node["children"])
+
+
+def build_top_level(today: dt.date, prev: dict[str, list[dict]] | None) -> list[dict]:
+    """Build the ordered list of top-level nodes (headings, dividers, item
+    subtrees). Item nodes keep their nested children."""
     prev = prev or {s: [] for s in SECTION_ORDER}
 
-    # Must / Forward / Want copied forward verbatim under their own headings.
-    must    = prev.get("Must", [])
-    forward = prev.get("Forward", [])
-    want    = prev.get("Want", [])
-
-    # Reminder copied forward, with deadline flagging (기한 만료 surfacing).
+    # Reminder: re-flag deadlines within the window (기한 만료 surfacing).
     reminders, flagged = [], 0
-    for item in prev.get("Reminder", []):
-        d = deadline_within_window(item, today)
+    for node in prev.get("Reminder", []):
+        node["text"] = _strip_flag(node["text"])
+        d = deadline_within_window(_subtree_text(node), today)
         if d is not None:
-            reminders.append(f"⚠ {item}  [D-{d}]")
+            node["text"] = f"⚠ {node['text']}  [D-{d}]"
             flagged += 1
-        else:
-            reminders.append(item)
+        reminders.append(node)
 
-    def numbered(items):
-        return "\n".join(f"{i}. {x}" for i, x in enumerate(items, 1)) if items else ""
+    out: list[dict] = []
 
-    hdr = "**Reminder**" + (f"  ⚠ {DEADLINE_WINDOW_DAYS}일 이내 마감 {flagged}건" if flagged else "")
-    blocks = [
-        "**Must**\n" + numbered(must),
-        "\n\n---\n\n**Forward**\n" + numbered(forward),
-        "\n\n---\n\n**Want**\n" + numbered(want),
-        "\n\n---\n\n" + hdr + "\n" + numbered(reminders),
-        "\n\n---\n\n**Done**\n",          # Done always starts empty
-    ]
-    return "".join(blocks)
+    def section(label: str, items: list[dict], suffix: str = ""):
+        if out:                              # divider before every section but the first
+            out.append(_divider_node())
+        out.append(_heading(label + suffix))
+        out.extend(items)
+
+    section("Must", prev.get("Must", []))
+    section("Forward", prev.get("Forward", []))
+    section("Want", prev.get("Want", []))
+    section("Reminder", reminders,
+            suffix=(f"  ⚠ {DEADLINE_WINDOW_DAYS}일 이내 마감 {flagged}건" if flagged else ""))
+    section("Done", [])                      # Done always starts empty
+    return out
 
 
-def create_page(parent_id: str, title: str, markdown: str) -> str:
-    """Create a child page (one block per line, dividers honored)."""
-    children = []
-    for raw in markdown.split("\n"):
-        if raw.strip() == "---":
-            children.append({"object": "block", "type": "divider", "divider": {}})
-            continue
-        children.append({
-            "object": "block",
-            "type": "paragraph",
-            "paragraph": {"rich_text": ([{"type": "text", "text": {"content": raw}}] if raw else [])},
-        })
+def _shallow_block(node: dict) -> dict:
+    """Convert one node to a Notion block dict WITHOUT its children
+    (children are appended in a later request)."""
+    t = node["type"]
+    if t == "divider":
+        return {"object": "block", "type": "divider", "divider": {}}
+    if t == "heading_3":
+        return {"object": "block", "type": "heading_3",
+                "heading_3": {"rich_text": [{"type": "text", "text": {"content": node["text"]}}]}}
+    if t not in LIST_TYPES:
+        t = "numbered_list_item"             # coerce anything unexpected
+    payload = {"rich_text": [{"type": "text", "text": {"content": node["text"]}}]}
+    if t == "to_do":
+        payload["checked"] = False
+    return {"object": "block", "type": t, t: payload}
+
+
+def _append_children(block_id: str, nodes: list[dict]) -> None:
+    """Append nodes under block_id, then recurse for any node with children.
+    Handles arbitrary nesting depth (one request per level)."""
+    nodes = [n for n in nodes if n["type"] == "divider" or n["text"] or n["children"]]
+    if not nodes:
+        return
+    specs = [_shallow_block(n) for n in nodes]
+    created = []
+    for i in range(0, len(specs), 100):      # API caps at 100 blocks per request
+        r = requests.patch(f"{API}/blocks/{block_id}/children",
+                            headers=HEADERS, json={"children": specs[i:i + 100]})
+        r.raise_for_status()
+        created.extend(r.json()["results"])
+    for node, cb in zip(nodes, created):
+        if node["children"]:
+            _append_children(cb["id"], node["children"])
+
+
+def create_page(parent_id: str, title: str, top_level: list[dict]) -> str:
+    """Create an empty titled page, then append the full nested tree into it."""
     payload = {
         "parent": {"page_id": parent_id},
         "properties": {"title": {"title": [{"text": {"content": title}}]}},
-        "children": children,
     }
     r = requests.post(f"{API}/pages", headers=HEADERS, json=payload)
     r.raise_for_status()
-    return r.json()["url"]
+    page = r.json()
+    _append_children(page["id"], top_level)
+    return page["url"]
 
 
 def move_page(page_id: str, new_parent_id: str) -> None:
@@ -268,8 +341,8 @@ def main() -> int:
     if home_today:
         print(f"Page for {today_title} already exists at 일상 메모. Skipping create.")
     else:
-        prev_sections = sectionize(read_blocks_text(prior_id)) if prior_id else None
-        url = create_page(HOME_PAGE_ID, today_title, build_markdown(today, prev_sections))
+        prev_sections = sectionize_tree(read_tree(prior_id)) if prior_id else None
+        url = create_page(HOME_PAGE_ID, today_title, build_top_level(today, prev_sections))
         print(f"Created {today_title} at 일상 메모: {url}")
 
     # 2) File every now-passed daily page at 일상 메모 into 기한 만료 → Calendar.
