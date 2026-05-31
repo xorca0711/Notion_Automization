@@ -47,7 +47,7 @@ DEADLINE_WINDOW_DAYS = 7
 # Sections copied into the next day, each preserved under its own heading.
 # Done is intentionally excluded, so the new day starts with an empty Done.
 CARRY_SECTIONS = ("Must", "Forward", "Want", "Reminder")
-SECTION_ORDER  = ("Must", "Forward", "Want", "Reminder", "Done")
+SECTION_ORDER  = ("Must", "Forward", "Reminder", "Want", "Done")
 
 API = "https://api.notion.com/v1"
 HEADERS = {
@@ -227,6 +227,11 @@ def _divider_node() -> dict:
     return {"type": "divider", "text": "", "children": []}
 
 
+def _placeholder() -> dict:
+    """An empty numbered-list item, so a cleared section shows a ready '1.'."""
+    return {"type": "numbered_list_item", "text": "", "children": [], "placeholder": True}
+
+
 # A previously-flagged reminder looks like "⚠ <text>  [D-3]". Strip the flag
 # back off before re-evaluating, so markers don't pile up day after day.
 _FLAG_RE = re.compile(r"^\s*⚠\s*")
@@ -272,11 +277,11 @@ def build_top_level(today: dt.date, prev: dict[str, list[dict]] | None) -> list[
     must_items = prev.get("Must", []) + prev.get("Forward", [])
 
     section("Must", must_items)
-    section("Forward", [])                    # emptied; its items promoted to Must
-    section("Want", prev.get("Want", []))
+    section("Forward", [_placeholder()])      # emptied; one ready '1.' to type into
     section("Reminder", reminders,
             suffix=(f"  ⚠ {DEADLINE_WINDOW_DAYS}일 이내 마감 {flagged}건" if flagged else ""))
-    section("Done", [])                      # Done always starts empty
+    section("Want", prev.get("Want", []))
+    section("Done", [_placeholder()])         # starts empty, with one ready '1.'
     return out
 
 
@@ -291,7 +296,8 @@ def _shallow_block(node: dict) -> dict:
                 "heading_3": {"rich_text": [{"type": "text", "text": {"content": node["text"]}}]}}
     if t not in LIST_TYPES:
         t = "numbered_list_item"             # coerce anything unexpected
-    payload = {"rich_text": [{"type": "text", "text": {"content": node["text"]}}]}
+    rich = [{"type": "text", "text": {"content": node["text"]}}] if node["text"] else []
+    payload = {"rich_text": rich}
     if t == "to_do":
         payload["checked"] = False
     return {"object": "block", "type": t, t: payload}
@@ -300,7 +306,8 @@ def _shallow_block(node: dict) -> dict:
 def _append_children(block_id: str, nodes: list[dict]) -> None:
     """Append nodes under block_id, then recurse for any node with children.
     Handles arbitrary nesting depth (one request per level)."""
-    nodes = [n for n in nodes if n["type"] == "divider" or n["text"] or n["children"]]
+    nodes = [n for n in nodes
+             if n["type"] == "divider" or n["text"] or n["children"] or n.get("placeholder")]
     if not nodes:
         return
     specs = [_shallow_block(n) for n in nodes]
