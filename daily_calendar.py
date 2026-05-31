@@ -264,8 +264,15 @@ def build_top_level(today: dt.date, prev: dict[str, list[dict]] | None) -> list[
         out.append(_heading(label + suffix))
         out.extend(items)
 
-    section("Must", prev.get("Must", []))
-    section("Forward", prev.get("Forward", []))
+    # Carry-forward rules:
+    #   Must (today) = leftover Must (yesterday) + Forward (yesterday)
+    #       — Forward items are "forwarded" into tomorrow's must-dos.
+    #   Forward (today) starts empty, ready for new items added during the day.
+    #   Want / Reminder carry into their own sections; Done starts empty.
+    must_items = prev.get("Must", []) + prev.get("Forward", [])
+
+    section("Must", must_items)
+    section("Forward", [])                    # emptied; its items promoted to Must
     section("Want", prev.get("Want", []))
     section("Reminder", reminders,
             suffix=(f"  ⚠ {DEADLINE_WINDOW_DAYS}일 이내 마감 {flagged}건" if flagged else ""))
