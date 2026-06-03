@@ -26,6 +26,7 @@ Setup:
 import os
 import re
 import sys
+import time
 import datetime as dt
 from zoneinfo import ZoneInfo
 
@@ -44,6 +45,10 @@ LEGACY_PARENTS  = ["1bb15161-6b44-80bc-841d-dda26d2ace2e"]  # 지나간 일들, 
 
 TZ = ZoneInfo("Asia/Seoul")
 DEADLINE_WINDOW_DAYS = 7
+# When a block claims to have children but the read returns none (sync lag or a
+# throttled response), retry this many times, sleeping BACKOFF*attempt seconds.
+CHILD_READ_RETRIES = 3
+CHILD_READ_BACKOFF = 1.5
 # Sections copied into the next day, each preserved under its own heading.
 # Done is intentionally excluded, so the new day starts with an empty Done.
 CARRY_SECTIONS = ("Must", "Forward", "Want", "Reminder")
@@ -110,7 +115,12 @@ def _block_text(b: dict) -> str:
 
 def read_tree(block_id: str) -> list[dict]:
     """Recursively read a page/block's children into nodes:
-    {type, text, children:[...]}. Preserves nesting depth."""
+    {type, text, children:[...]}. Preserves nesting depth.
+
+    If a block reports has_children but the recursive read comes back empty
+    (a sign of Notion sync lag or a throttled/partial API response), retry a
+    few times with a short backoff before accepting the empty result — this
+    guards against nested items silently going missing at read time."""
     nodes, cursor = [], None
     while True:
         params = {"page_size": 100}
@@ -125,7 +135,13 @@ def read_tree(block_id: str) -> list[dict]:
                 continue
             node = {"type": t, "text": _block_text(b), "children": []}
             if b.get("has_children"):
-                node["children"] = read_tree(b["id"])
+                children = read_tree(b["id"])
+                for attempt in range(CHILD_READ_RETRIES):
+                    if children:
+                        break
+                    time.sleep(CHILD_READ_BACKOFF * (attempt + 1))
+                    children = read_tree(b["id"])
+                node["children"] = children
             nodes.append(node)
         if not data.get("has_more"):
             break
