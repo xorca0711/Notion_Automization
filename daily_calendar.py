@@ -7,7 +7,9 @@ Flow, once per run (intended to fire at 03:00 KST):
   2. Find the most recent prior daily page (yesterday) to carry from.
   3. Copy Must + Forward + Want + Reminder forward, each into its own
      section; flag Reminder items whose dates fall within
-     DEADLINE_WINDOW_DAYS (기한 만료). Done starts empty each day.
+     DEADLINE_WINDOW_DAYS (기한 만료). Done and Daily 1-line start
+     empty each day (Daily 1-line = a one-line reflection for later
+     retrospectives; it never carries forward).
   4. CREATE today's page at the 일상 메모 top level (HOME_PAGE_ID).
   5. MOVE every now-passed daily page sitting at the 일상 메모 level down
      into 기한 만료 → Calendar (ARCHIVE_PAGE_ID), filing the day away.
@@ -52,7 +54,10 @@ CHILD_READ_BACKOFF = 1.5
 # Sections copied into the next day, each preserved under its own heading.
 # Done is intentionally excluded, so the new day starts with an empty Done.
 CARRY_SECTIONS = ("Must", "Forward", "Want", "Reminder")
-SECTION_ORDER  = ("Must", "Forward", "Reminder", "Want", "Done")
+# "Daily 1-line" is listed here only so the parser recognizes it as a section
+# header when reading yesterday's page; it is deliberately NOT in CARRY_SECTIONS,
+# so it always starts blank (a fresh one-line reflection each day).
+SECTION_ORDER  = ("Must", "Forward", "Reminder", "Want", "Done", "Daily 1-line")
 
 API = "https://api.notion.com/v1"
 HEADERS = {
@@ -298,6 +303,8 @@ def build_top_level(today: dt.date, prev: dict[str, list[dict]] | None) -> list[
             suffix=(f"  ⚠ {DEADLINE_WINDOW_DAYS}일 이내 마감 {flagged}건" if flagged else ""))
     section("Want", prev.get("Want", []))
     section("Done", [_placeholder()])         # starts empty, with one ready '1.'
+    section("Daily 1-line", [_placeholder()]) # bottom of page; blank each day for
+                                              # a one-line reflection (retrospective fuel)
     return out
 
 
