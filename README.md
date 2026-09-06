@@ -24,7 +24,7 @@ Each source uses these properties:
 | Advance Days | Number | Whole days before the relevant date; 0 means that day |
 | Reminder Type | Select | `Deadline`, `Event`, `Period`, or `Exam` |
 
-Set the repository Actions variable `REMINDER_SOURCES_JSON` to a JSON array:
+Set the encrypted repository Actions secret `REMINDER_SOURCES_JSON` to a JSON array:
 
 ```json
 [{"data_source_id": "YOUR_DATA_SOURCE_UUID", "label": "Tracker"}]

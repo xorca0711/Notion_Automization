@@ -50,6 +50,6 @@ jobs:
           python daily_calendar.py "${args[@]}"
         env:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
-          REMINDER_SOURCES_JSON: ${{ vars.REMINDER_SOURCES_JSON }}
+          REMINDER_SOURCES_JSON: ${{ secrets.REMINDER_SOURCES_JSON }}
           RUN_MODE: ${{ inputs.mode || 'apply' }}
           PREVIEW_DATE: ${{ inputs.preview_date }}
