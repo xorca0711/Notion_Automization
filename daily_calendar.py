@@ -26,6 +26,8 @@ Setup:
 """
 
 import os
+import argparse
+import json
 import re
 import sys
 import time
@@ -33,11 +35,12 @@ import datetime as dt
 from zoneinfo import ZoneInfo
 
 import requests
+import timeline_reminders as reminders
 
 # ----------------------------------------------------------------------------
 # Config
 # ----------------------------------------------------------------------------
-NOTION_TOKEN = os.environ["NOTION_TOKEN"]
+NOTION_TOKEN = os.environ.get("NOTION_TOKEN", "")
 
 HOME_PAGE_ID    = "a9788871-eddc-40f9-8c6c-f3c1edd18c9a"   # 일상 메모  (new pages created here)
 ARCHIVE_PAGE_ID = "35d15161-6b44-80b0-9fe3-c8224955c573"   # 기한 만료 → Calendar (passed days filed here)
@@ -136,6 +139,8 @@ def read_tree(block_id: str) -> list[dict]:
         data = r.json()
         for b in data["results"]:
             t = b["type"]
+            if reminders.is_managed_block(b):
+                continue                       # regenerated from trackers, never carried
             if t == "child_page":               # don't descend into sub-pages
                 continue
             node = {"type": t, "text": _block_text(b), "children": []}
@@ -355,7 +360,7 @@ def create_page(parent_id: str, title: str, top_level: list[dict]) -> str:
     r.raise_for_status()
     page = r.json()
     _append_children(page["id"], top_level)
-    return page["url"]
+    return page["id"]
 
 
 def move_page(page_id: str, new_parent_id: str) -> None:
@@ -369,8 +374,42 @@ def move_page(page_id: str, new_parent_id: str) -> None:
 # Main
 # ----------------------------------------------------------------------------
 def main() -> int:
-    today = dt.datetime.now(TZ).date()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--dry-run", action="store_true", help="Read tracker data; never write Notion")
+    parser.add_argument("--date", type=dt.date.fromisoformat, help="Preview date (requires --dry-run)")
+    args = parser.parse_args()
+    if args.date and not args.dry_run:
+        parser.error("--date is only allowed with --dry-run")
+    if not NOTION_TOKEN:
+        parser.error("NOTION_TOKEN is required")
+    today = args.date or dt.datetime.now(TZ).date()
     today_title = title_for(today)
+
+    client = reminders.Notion(NOTION_TOKEN)
+    sources = reminders.sources_from_env()
+    automatic, source_error = None, False
+    try:
+        if sources:
+            items = reminders.collect(client, sources, today)
+            automatic = reminders.render(items, today)
+        else:
+            items = []
+        if args.dry_run:
+            # This repository is public. Do not publish private task titles,
+            # source URLs or notes in Actions logs/artifacts.
+            print(json.dumps({"mode": "read-only preview", "date": today.isoformat(),
+                              "sources_read": len(sources), "visible_items": len(items),
+                              "by_type": {kind: sum(i["kind"] == kind for i in items)
+                                          for kind in reminders.KINDS}}))
+            return 0
+    except (requests.RequestException, ValueError, KeyError) as exc:
+        print(f"Automatic reminder read failed ({type(exc).__name__}). "
+              "Check tracker access and property configuration.", file=sys.stderr)
+        if isinstance(exc, reminders.SourceReadError):
+            print(str(exc), file=sys.stderr)
+        if args.dry_run:
+            return 1
+        source_error = True
 
     prior_id, home_stale = find_prior_daily(today)
 
@@ -378,11 +417,17 @@ def main() -> int:
     home_today = [c for c in list_child_pages(HOME_PAGE_ID)
                   if parse_title_date(c["title"], today.year) == today]
     if home_today:
-        print(f"Page for {today_title} already exists at 일상 메모. Skipping create.")
+        if len(home_today) > 1:
+            raise RuntimeError("Multiple pages for today; refusing an ambiguous refresh")
+        page_id = home_today[0]["id"]
+        print(f"Page for {today_title} already exists; refreshing automatic reminders only.")
     else:
         prev_sections = sectionize_tree(read_tree(prior_id)) if prior_id else None
-        url = create_page(HOME_PAGE_ID, today_title, build_top_level(today, prev_sections))
-        print(f"Created {today_title} at 일상 메모: {url}")
+        page_id = create_page(HOME_PAGE_ID, today_title, build_top_level(today, prev_sections))
+        print(f"Created {today_title} at 일상 메모.")
+
+    if automatic is not None:
+        reminders.sync(client, page_id, automatic)
 
     # 2) File every now-passed daily page at 일상 메모 into 기한 만료 → Calendar.
     for c in home_stale:
@@ -392,7 +437,7 @@ def main() -> int:
         except requests.HTTPError as e:
             print(f"Could not move {c['title']}: {e}", file=sys.stderr)
 
-    return 0
+    return 1 if source_error else 0
 
 
 if __name__ == "__main__":
