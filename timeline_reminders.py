@@ -19,6 +19,10 @@ KINDS = {"Deadline": 7, "Event": 7, "Period": 7, "Exam": 14}
 COMPLETE = {"완료", "Done", "Complete", "Completed", "취소", "Cancelled", "Canceled"}
 
 
+class SourceReadError(ValueError):
+    """Safe diagnostic: source ordinal and HTTP status, never response bodies."""
+
+
 def plain(rich: list[dict]) -> str:
     return "".join(x.get("plain_text", x.get("text", {}).get("content", "")) for x in rich)
 
@@ -174,12 +178,20 @@ def item_for(page: dict, label: str, today: dt.date) -> dict | None:
 def collect(client: Notion, sources: list[dict], today: dt.date) -> list[dict]:
     # Finish every source read before writing anything; a failed source must
     # never masquerade as an empty/complete tracker.
-    items = {}
-    for source in sources:
-        for page in client.query(source):
+    items, failures = {}, []
+    for index, source in enumerate(sources, 1):
+        try:
+            pages = client.query(source)
+        except requests.HTTPError as exc:
+            status = exc.response.status_code if exc.response is not None else "unknown"
+            failures.append(f"source {index}: HTTP {status}")
+            continue
+        for page in pages:
             item = item_for(page, source["label"], today)
             if item:
                 items[item["id"]] = item
+    if failures:
+        raise SourceReadError("; ".join(failures))
     return sorted(items.values(), key=lambda x: x["sort"])
 
 

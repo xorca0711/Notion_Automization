@@ -405,6 +405,8 @@ def main() -> int:
     except (requests.RequestException, ValueError, KeyError) as exc:
         print(f"Automatic reminder read failed ({type(exc).__name__}). "
               "Check tracker access and property configuration.", file=sys.stderr)
+        if isinstance(exc, reminders.SourceReadError):
+            print(str(exc), file=sys.stderr)
         if args.dry_run:
             return 1
         source_error = True

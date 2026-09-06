@@ -178,6 +178,17 @@ class SyncTests(unittest.TestCase):
 
 
 class QueryTests(unittest.TestCase):
+    def test_http_diagnostic_checks_all_sources_without_leaking_content(self):
+        client = r.Notion("fake")
+        response = r.requests.Response()
+        response.status_code = 404
+        error = r.requests.HTTPError("private source URL and response", response=response)
+        with patch.object(client, "query", side_effect=error) as query:
+            with self.assertRaisesRegex(r.SourceReadError, "source 1: HTTP 404; source 2: HTTP 404") as caught:
+                r.collect(client, [{"label": "A"}, {"label": "B"}], dt.date(2026, 9, 7))
+            self.assertEqual(query.call_count, 2)
+            self.assertNotIn("private", str(caught.exception))
+
     def test_pagination_and_opt_in_filter(self):
         client = r.Notion("fake")
         with patch.object(client, "request", side_effect=[
