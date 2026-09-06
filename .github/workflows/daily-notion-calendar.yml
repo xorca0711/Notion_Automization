@@ -6,17 +6,50 @@ name: daily-notion-calendar
 on:
   schedule:
     - cron: "0 18 * * *"
-  workflow_dispatch: {}   # lets you trigger a run manually from the Actions tab
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Preview reads trackers without writing; apply refreshes today's page
+        type: choice
+        options: [preview, apply]
+        default: preview
+      preview_date:
+        description: Optional YYYY-MM-DD (preview only)
+        type: string
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: daily-notion-calendar
+  cancel-in-progress: false
 
 jobs:
   generate:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install requests
-      - run: python daily_calendar.py
+      - run: pip install requests tzdata
+      - run: python -m unittest discover -s tests -v
+      - name: Generate or preview daily reminders
+        shell: bash
+        run: |
+          args=()
+          if [[ "$RUN_MODE" == "preview" ]]; then
+            args+=(--dry-run)
+            if [[ -n "$PREVIEW_DATE" ]]; then args+=(--date "$PREVIEW_DATE"); fi
+          elif [[ -n "$PREVIEW_DATE" ]]; then
+            echo 'A preview date cannot be used in apply mode.' >&2
+            exit 1
+          fi
+          python daily_calendar.py "${args[@]}"
         env:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          REMINDER_SOURCES_JSON: ${{ vars.REMINDER_SOURCES_JSON }}
+          RUN_MODE: ${{ inputs.mode || 'apply' }}
+          PREVIEW_DATE: ${{ inputs.preview_date }}
