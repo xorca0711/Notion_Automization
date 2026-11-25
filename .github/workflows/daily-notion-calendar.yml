@@ -1,11 +1,11 @@
 name: daily-notion-calendar
 
-# 03:00 KST = 18:00 UTC (KST is UTC+9, no daylight saving).
-# Note: GitHub's scheduler can lag a few minutes under load; if exact 3 AM
-# matters, this still lands within the early-morning window.
+# Primary: 03:00 KST (18:00 UTC); backup: 06:00 KST (21:00 UTC).
+# GitHub scheduled runs may be delayed; neither time is guaranteed.
 on:
   schedule:
     - cron: "0 18 * * *"
+    - cron: "0 21 * * *"
   workflow_dispatch:
     inputs:
       mode:
